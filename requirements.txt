@@ -1,0 +1,19 @@
+# Requirements for Transcripta - Apple Silicon Optimized
+
+# Machine Learning & AI
+numpy<2
+mlx-whisper
+pyannote.audio
+torch
+torchvision
+openai
+python-dotenv
+google-generativeai
+rich
+inquirer
+
+# Audio/Video Processing
+# Note: ffmpeg must be installed on the system (e.g., brew install ffmpeg)
+
+# Utilities
+tqdm
