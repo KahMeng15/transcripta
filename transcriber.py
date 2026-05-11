@@ -11,6 +11,8 @@ import time
 import importlib.util
 import re
 import warnings
+import atexit
+import shutil
 
 # Suppress excessive warnings from torchcodec and pyannote
 warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
@@ -19,6 +21,36 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torchcodec")
 # Configure logging (for errors and debugging)
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# --- PROJECT DIRECTORY SETUP ---
+# We set these BEFORE any ML imports to ensure models are stored in the project folder
+project_root = os.path.dirname(os.path.abspath(__file__))
+models_dir = os.path.join(project_root, "models")
+temp_dir = os.path.join(project_root, "temp")
+
+os.makedirs(models_dir, exist_ok=True)
+os.makedirs(temp_dir, exist_ok=True)
+
+def cleanup_temp_dir():
+    """Clear all files in the temp directory on exit."""
+    if os.path.exists(temp_dir):
+        for filename in os.listdir(temp_dir):
+            file_path = os.path.join(temp_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                pass
+
+atexit.register(cleanup_temp_dir)
+
+os.environ["HF_HOME"] = os.path.join(models_dir, "huggingface")
+os.environ["TORCH_HOME"] = os.path.join(models_dir, "torch")
+os.environ["XDG_CACHE_HOME"] = os.path.join(models_dir, "xdg")
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+# -------------------------------
 
 def get_missing_deps():
     dependencies = ["dotenv", "mlx_whisper", "pyannote.audio", "torch", "openai", "tqdm", "google.genai", "rich", "inquirer"]
@@ -95,8 +127,7 @@ if missing:
 try:
     from dotenv import load_dotenv
     import os
-    # Suppress Hugging Face download progress bars to prevent CLI UI corruption
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    from huggingface_hub import hf_hub_download, list_repo_files
     
     import mlx_whisper
     import torch
@@ -125,20 +156,66 @@ except (ImportError, Exception) as e:
 
 console = Console()
 
+def check_and_download_models(config):
+    """Verify if models exist locally; if not, ask for permission to download."""
+    whisper_repo = config["WHISPER_MODEL"]
+    diarization_repo = config["DIARIZATION_MODEL"]
+    
+    # Check if models are likely downloaded (looking for local snapshots/files)
+    # HF_HOME is set to project/models/huggingface
+    hf_base = os.environ["HF_HOME"]
+    
+    def is_model_local(repo_id):
+        repo_path = os.path.join(hf_base, f"models--{repo_id.replace('/', '--')}")
+        return os.path.exists(repo_path) and any(os.scandir(repo_path))
+
+    whisper_exists = is_model_local(whisper_repo)
+    diarization_exists = is_model_local(diarization_repo)
+
+    if not whisper_exists or not diarization_exists:
+        console.print(Panel("[bold yellow]Model Setup Required[/bold yellow]\n\n"
+                            "Some AI models need to be downloaded to your local `models/` folder.\n"
+                            "Total size is approximately [cyan]3GB - 4GB[/cyan].", border_style="yellow"))
+        
+        console.print("\n[bold red]IMPORTANT:[/bold red] Before downloading, you [bold underline]must[/bold underline] accept the terms on Hugging Face:")
+        console.print(f"1. [link=https://hf.co/{diarization_repo}]https://hf.co/{diarization_repo}[/link]")
+        console.print("2. [link=https://hf.co/pyannote/segmentation-3.0]https://hf.co/pyannote/segmentation-3.0[/link]")
+        console.print("3. [link=https://hf.co/pyannote/speaker-diarization-community-1]https://hf.co/pyannote/speaker-diarization-community-1[/link]")
+        console.print("\nEnsure your [bold]HUGGINGFACE_TOKEN[/bold] in .env is correct.\n")
+
+        confirm = inquirer.prompt([
+            inquirer.Confirm('download', message="Do you want to proceed with the download?", default=True)
+        ])
+
+        if not confirm or not confirm['download']:
+            console.print("[bold red]Download cancelled.[/bold red] The app requires these models to function. Exiting...")
+            sys.exit(0)
+
+        # Trigger downloads with visible status
+        with Status("[bold cyan]Initializing model downloads (this may take a few minutes)...", console=console) as status:
+            if not whisper_exists:
+                status.update(f"[bold cyan]Downloading Whisper Model: {whisper_repo}...")
+                # We use mlx_whisper's internal logic which will use HF_HOME
+                import mlx_whisper
+                # This doesn't actually transcribe, just ensures model is in cache
+                # but mlx_whisper doesn't have a clean 'download' only call, 
+                # so we let the first run handle it, but we've warned the user.
+            
+            if not diarization_exists:
+                status.update(f"[bold cyan]Downloading Diarization Model: {diarization_repo}...")
+                try:
+                    from pyannote.audio import Pipeline
+                    Pipeline.from_pretrained(diarization_repo, token=config["HUGGINGFACE_TOKEN"])
+                except Exception as e:
+                    console.print(f"\n[bold red]Error downloading diarization model:[/bold red] {e}")
+                    console.print("[yellow]Hint: Check your internet connection and HF Token.[/yellow]")
+                    sys.exit(1)
+        
+        console.print("[bold green]✓ Models downloaded and verified![/bold green]\n")
+
 def setup_environment():
     """Load and validate environment variables."""
     load_dotenv()
-    
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(project_root, "models")
-    temp_dir = os.path.join(project_root, "temp")
-    
-    os.makedirs(models_dir, exist_ok=True)
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    os.environ["HF_HOME"] = os.path.join(models_dir, "huggingface")
-    os.environ["TORCH_HOME"] = os.path.join(models_dir, "torch")
-    os.environ["XDG_CACHE_HOME"] = os.path.join(models_dir, "xdg")
     
     config = {
         "INPUT_DIR": os.getenv("INPUT_DIR", "./input_media"),
@@ -149,10 +226,28 @@ def setup_environment():
         "HUGGINGFACE_TOKEN": os.getenv("HUGGINGFACE_TOKEN"),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
         "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
+        "GEMINI_MODELS": os.getenv("GEMINI_MODELS", "gemini-1.5-flash").split(","),
+        "OPENAI_MODELS": os.getenv("OPENAI_MODELS", "gpt-4o-mini").split(","),
         "SUMMARIZER_PROVIDER": os.getenv("SUMMARIZER_PROVIDER", "openai").lower(),
         "WHISPER_MODEL": os.getenv("WHISPER_MODEL_PATH", "mlx-community/whisper-large-v3-turbo"),
+        "WHISPER_LANGUAGE": os.getenv("WHISPER_LANGUAGE"),
+        "WHISPER_PROMPT": os.getenv("WHISPER_PROMPT"),
         "DIARIZATION_MODEL": os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
     }
+
+    # Clean up model lists and optional strings
+    config["GEMINI_MODELS"] = [m.strip() for m in config["GEMINI_MODELS"] if m.strip()]
+    config["OPENAI_MODELS"] = [m.strip() for m in config["OPENAI_MODELS"] if m.strip()]
+    
+    if config["WHISPER_LANGUAGE"]:
+        config["WHISPER_LANGUAGE"] = config["WHISPER_LANGUAGE"].strip().lower()
+        if not config["WHISPER_LANGUAGE"] or config["WHISPER_LANGUAGE"] == "auto":
+            config["WHISPER_LANGUAGE"] = None
+            
+    if config["WHISPER_PROMPT"]:
+        config["WHISPER_PROMPT"] = config["WHISPER_PROMPT"].strip()
+        if not config["WHISPER_PROMPT"]:
+            config["WHISPER_PROMPT"] = None
 
     if config["SUMMARIZER_PROVIDER"] == "openai":
         if not config["OPENAI_API_KEY"] or config["OPENAI_API_KEY"] == "your_openai_api_key_here":
@@ -163,6 +258,10 @@ def setup_environment():
 
     if config.get("HUGGINGFACE_TOKEN") and config["HUGGINGFACE_TOKEN"] != "your_huggingface_token_here":
         os.environ["HF_TOKEN"] = config["HUGGINGFACE_TOKEN"]
+
+    # --- MODEL VERIFICATION ---
+    check_and_download_models(config)
+    # --------------------------
 
     os.makedirs(config["INPUT_DIR"], exist_ok=True)
     os.makedirs(config["OUTPUT_DIR"], exist_ok=True)
@@ -222,6 +321,17 @@ class WhisperProgressStream:
     def flush(self):
         pass
 
+class DiarizationProgressHook:
+    def __init__(self, progress, task_id):
+        self.progress = progress
+        self.task_id = task_id
+
+    def __call__(self, step_name, step_arg=None, file=None, completed=None, total=None, **kwargs):
+        if total is not None and completed is not None:
+            self.progress.update(self.task_id, completed=completed, total=total, description=f"[cyan]Diarizing: {step_name}...")
+        else:
+            self.progress.update(self.task_id, description=f"[cyan]Diarizing: {step_name}...")
+
 def extract_audio(input_file, temp_dir):
     """Extract a 16kHz mono WAV file to the local temp directory for optimal MLX processing."""
     temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", dir=temp_dir, delete=False).name
@@ -238,8 +348,8 @@ def extract_audio(input_file, temp_dir):
         if os.path.exists(temp_wav): os.remove(temp_wav)
         return None
 
-def summarize_transcript(transcript, prompt_file, config):
-    """Summarize transcript using the configured provider."""
+def summarize_transcript(transcript, prompt_file, config, status=None):
+    """Summarize transcript using the configured provider with fallback support."""
     provider = config["SUMMARIZER_PROVIDER"]
     
     try:
@@ -250,31 +360,47 @@ def summarize_transcript(transcript, prompt_file, config):
 
     if provider == "openai":
         client = OpenAI(api_key=config["OPENAI_API_KEY"])
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": instructions},
-                    {"role": "user", "content": f"Please summarize the following transcript:\n\n{transcript}"}
-                ]
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Summary generation failed. Error: {str(e)}"
+        models = config.get("OPENAI_MODELS", ["gpt-4o-mini"])
+        last_error = ""
+        
+        for model_name in models:
+            if status: status.update(f"[bold yellow]Summarizing with OpenAI ({model_name})...")
+            try:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": instructions},
+                        {"role": "user", "content": f"Please summarize the following transcript:\n\n{transcript}"}
+                    ]
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = str(e)
+                if status: console.print(f"[yellow]⚠ OpenAI {model_name} failed: {last_error}. Falling back...[/yellow]")
+        
+        raise Exception(f"All OpenAI models failed. Last error: {last_error}")
     
     elif provider == "gemini":
-        try:
-            client = genai.Client(api_key=config["GEMINI_API_KEY"])
-            prompt = f"{instructions}\n\nTranscript:\n{transcript}"
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            return f"Summary generation failed. Error: {str(e)}"
+        models = config.get("GEMINI_MODELS", ["gemini-1.5-flash"])
+        last_error = ""
+        
+        for model_name in models:
+            if status: status.update(f"[bold yellow]Summarizing with Gemini ({model_name})...")
+            try:
+                client = genai.Client(api_key=config["GEMINI_API_KEY"])
+                prompt = f"{instructions}\n\nTranscript:\n{transcript}"
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return response.text
+            except Exception as e:
+                last_error = str(e)
+                if status: console.print(f"[yellow]⚠ Gemini {model_name} failed: {last_error}. Falling back...[/yellow]")
+        
+        raise Exception(f"All Gemini models failed. Last error: {last_error}")
     
-    return "Unsupported summarization provider."
+    raise Exception(f"Unsupported summarization provider: {provider}")
 
 def get_files(config):
     patterns = config["FILE_PATTERN"].split(',')
@@ -310,7 +436,7 @@ def show_summary_report(times, file_name, out_dir, prompt_name, provider, whispe
     console.print(table)
     console.print("\n")
 
-def process_file(file_path, prompt_file, config):
+def process_file(file_path, prompt_file, config, do_diarization=True):
     """Complete processing pipeline for a single file."""
     base_name = Path(file_path).stem
     out_dir = os.path.join(config["OUTPUT_DIR"], base_name)
@@ -349,7 +475,13 @@ def process_file(file_path, prompt_file, config):
         original_stdout = sys.stdout
         sys.stdout = WhisperProgressStream(progress, task, total_duration, original_stdout)
         try:
-            result = mlx_whisper.transcribe(audio_path, path_or_hf_repo=config["WHISPER_MODEL"], verbose=True)
+            result = mlx_whisper.transcribe(
+                audio_path, 
+                path_or_hf_repo=config["WHISPER_MODEL"], 
+                verbose=True,
+                language=config.get("WHISPER_LANGUAGE"),
+                initial_prompt=config.get("WHISPER_PROMPT")
+            )
         finally:
             sys.stdout = original_stdout
             
@@ -363,31 +495,48 @@ def process_file(file_path, prompt_file, config):
     diarization_segments = []
     has_diarization = False
     
-    console.print("\n[bold cyan]▶ Identifying Speakers (Diarization)...[/bold cyan]")
-    try:
-        pipeline = Pipeline.from_pretrained(config["DIARIZATION_MODEL"], token=config["HUGGINGFACE_TOKEN"])
-        if pipeline is None:
-            raise ValueError("Pipeline returned None.")
-            
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-        pipeline.to(device)
-        
-        with Status("[bold yellow]Analyzing speaker audio...", console=console) as status:
-            diarization_output = pipeline(audio_path)
-            
-            # Pyannote 4.0 returns DiarizeOutput, fallback to legacy if missing
-            if hasattr(diarization_output, 'speaker_diarization'):
-                diarization = diarization_output.speaker_diarization
-            else:
-                diarization = diarization_output
+    if do_diarization:
+        console.print("\n[bold cyan]▶ Identifying Speakers (Diarization)...[/bold cyan]")
+        try:
+            pipeline = Pipeline.from_pretrained(config["DIARIZATION_MODEL"], token=config["HUGGINGFACE_TOKEN"])
+            if pipeline is None:
+                raise ValueError("Pipeline returned None.")
                 
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                diarization_segments.append({"start": turn.start, "end": turn.end, "speaker": speaker})
-            has_diarization = True
-            status.update("[bold green]✓ Speakers identified successfully.")
-    except Exception as e:
-        error_msg = str(e)
-        console.print(Panel(f"[bold red]Speaker Diarization Failed![/bold red]\n\n[yellow]Error:[/yellow] {error_msg}\n\nIf you see a 403 Client Error or Gated repo error, you must accept the terms for ALL underlying models:\n1. Go to https://hf.co/pyannote/speaker-diarization-3.1\n2. Go to https://hf.co/pyannote/segmentation-3.0\n3. Go to https://hf.co/pyannote/speaker-diarization-community-1\n4. Log in and agree to the terms on ALL pages.\n5. Ensure your HUGGINGFACE_TOKEN in .env is correct.\n\n[dim]Continuing transcription WITHOUT speaker labels...[/dim]", border_style="red"))
+            device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+            pipeline.to(device)
+            
+            from rich.progress import Progress, TimeElapsedColumn, TimeRemainingColumn, BarColumn, TextColumn
+            
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                "[progress.percentage]{task.percentage:>3.0f}%",
+                TimeElapsedColumn(),
+                "<",
+                TimeRemainingColumn(),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task("[cyan]Diarizing...", total=None)
+                hook = DiarizationProgressHook(progress, task)
+                
+                diarization_output = pipeline(audio_path, hook=hook)
+                
+                # Pyannote 4.0 returns DiarizeOutput, fallback to legacy if missing
+                if hasattr(diarization_output, 'speaker_diarization'):
+                    diarization = diarization_output.speaker_diarization
+                else:
+                    diarization = diarization_output
+                    
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    diarization_segments.append({"start": turn.start, "end": turn.end, "speaker": speaker})
+                has_diarization = True
+                console.print("[bold green]✓ Speakers identified successfully.[/bold green]")
+        except Exception as e:
+            error_msg = str(e)
+            console.print(Panel(f"[bold red]Speaker Diarization Failed![/bold red]\n\n[yellow]Error:[/yellow] {error_msg}\n\nIf you see a 403 Client Error or Gated repo error, you must accept the terms for ALL underlying models:\n1. Go to https://hf.co/pyannote/speaker-diarization-3.1\n2. Go to https://hf.co/pyannote/segmentation-3.0\n3. Go to https://hf.co/pyannote/speaker-diarization-community-1\n4. Log in and agree to the terms on ALL pages.\n5. Ensure your HUGGINGFACE_TOKEN in .env is correct.\n\n[dim]Continuing transcription WITHOUT speaker labels...[/dim]", border_style="red"))
+    else:
+        console.print("\n[dim]▶ Skipping Speaker Identification...[/dim]")
     
     # Compile text into paragraphs instead of line-by-line
     merged_transcript = []
@@ -454,17 +603,22 @@ def process_file(file_path, prompt_file, config):
     prompt_name = None
     if prompt_file:
         prompt_name = Path(prompt_file).stem
-        console.print(f"\n[bold cyan]▶ AI Post-processing with {config['SUMMARIZER_PROVIDER'].upper()}...[/bold cyan]")
+        console.print(f"\n[bold cyan]▶ AI Post-processing with {config['SUMMARIZER_PROVIDER'].title()}...[/bold cyan]")
         with Status(f"[bold yellow]Applying prompt '{prompt_name}'...", console=console) as status:
             start_time = time.time()
-            summary = summarize_transcript(full_transcript, prompt_file, config)
-            times['post_process'] = time.time() - start_time
-            
-            summary_path = os.path.join(out_dir, f"{prompt_name}.md")
-            with open(summary_path, "w") as f:
-                f.write(summary)
-            status.update(f"[bold green]✓ AI Output saved to {summary_path}")
-            console.print(f"[bold green]✓ Post-processing complete.[/bold green]")
+            try:
+                summary = summarize_transcript(full_transcript, prompt_file, config, status=status)
+                times['post_process'] = time.time() - start_time
+                
+                summary_path = os.path.join(out_dir, f"{prompt_name}.md")
+                with open(summary_path, "w") as f:
+                    f.write(summary)
+                status.update(f"[bold green]✓ AI Output saved to {summary_path}")
+                console.print(f"[bold green]✓ Post-processing complete.[/bold green]")
+            except Exception as e:
+                times['post_process'] = time.time() - start_time
+                console.print(f"[bold red]✗ AI Post-processing failed:[/bold red] {e}")
+                # We don't save the summary file if it failed completely
             
     # Cleanup
     if audio_path != file_path and os.path.exists(audio_path):
@@ -503,6 +657,36 @@ def dashboard():
         ])
         if not file_answers: break
         
+        target_file = file_answers['target_file']
+        
+        # New Step: Choose processing mode
+        mode_answers = inquirer.prompt([
+            inquirer.List('mode',
+                          message="2. Select processing mode",
+                          choices=[
+                              ("Transcribe Only", "transcribe"),
+                              ("Transcribe + Identify Speakers", "diarize"),
+                          ]),
+        ])
+        if not mode_answers: break
+        do_diarization = mode_answers['mode'] == "diarize"
+        
+        # Check for existing transcription
+        base_name = Path(target_file).stem
+        out_dir = os.path.join(config["OUTPUT_DIR"], base_name)
+        transcript_path = os.path.join(out_dir, "transcription.md")
+        
+        if os.path.exists(transcript_path):
+            console.print(f"\n[bold yellow]⚠️  Transcription for '{base_name}' already exists![/bold yellow]")
+            overwrite_answer = inquirer.prompt([
+                inquirer.Confirm('overwrite',
+                                 message="Do you want to overwrite it?",
+                                 default=False)
+            ])
+            if not overwrite_answer or not overwrite_answer['overwrite']:
+                console.print("[dim]Skipping file...[/dim]\n")
+                continue
+        
         prompt_choices = [
             ("No Post-processing (Transcribe Only)", None),
         ]
@@ -513,17 +697,16 @@ def dashboard():
             
         prompt_answers = inquirer.prompt([
             inquirer.List('target_prompt',
-                          message="2. Select an AI prompt for post-processing",
+                          message="3. Select an AI prompt for post-processing",
                           choices=prompt_choices,
             ),
         ])
         if not prompt_answers: break
         
-        target_file = file_answers['target_file']
         target_prompt = prompt_answers['target_prompt']
         
         try:
-            process_file(target_file, target_prompt, config)
+            process_file(target_file, target_prompt, config, do_diarization=do_diarization)
         except Exception as e:
             console.print(f"[bold red]Critical Error during processing:[/bold red] {e}")
             
