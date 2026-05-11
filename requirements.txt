@@ -1,14 +1,14 @@
 # Requirements for Transcripta - Apple Silicon Optimized
 
 # Machine Learning & AI
-numpy<2
+numpy
 mlx-whisper
-pyannote.audio
+pyannote.audio>=4.0
 torch
 torchvision
 openai
 python-dotenv
-google-generativeai
+google-genai
 rich
 inquirer
 
