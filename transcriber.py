@@ -13,6 +13,7 @@ import re
 import warnings
 import atexit
 import shutil
+import shlex
 
 # Suppress excessive warnings from torchcodec and pyannote
 warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
@@ -166,7 +167,7 @@ def check_and_download_models(config):
     hf_base = os.environ["HF_HOME"]
     
     def is_model_local(repo_id):
-        repo_path = os.path.join(hf_base, f"models--{repo_id.replace('/', '--')}")
+        repo_path = os.path.join(hf_base, "hub", f"models--{repo_id.replace('/', '--')}")
         return os.path.exists(repo_path) and any(os.scandir(repo_path))
 
     whisper_exists = is_model_local(whisper_repo)
@@ -348,7 +349,7 @@ def extract_audio(input_file, temp_dir):
         if os.path.exists(temp_wav): os.remove(temp_wav)
         return None
 
-def summarize_transcript(transcript, prompt_file, config, status=None):
+def summarize_transcript(transcript, prompt_file, config, status=None, target_language="auto"):
     """Summarize transcript using the configured provider with fallback support."""
     provider = config["SUMMARIZER_PROVIDER"]
     
@@ -357,6 +358,11 @@ def summarize_transcript(transcript, prompt_file, config, status=None):
             instructions = f.read()
     except FileNotFoundError:
         instructions = "Please summarize this meeting transcript."
+
+    if target_language == "english":
+        instructions += "\n\nIMPORTANT: Please generate the final output in English."
+    elif target_language == "malay":
+        instructions += "\n\nIMPORTANT: Sila hasilkan output dalam Bahasa Melayu."
 
     if provider == "openai":
         client = OpenAI(api_key=config["OPENAI_API_KEY"])
@@ -416,6 +422,56 @@ def get_prompts(config):
     prompts.sort()
     return prompts
 
+def clean_path(path_str):
+    """Clean terminal-specific artifacts from a single path string."""
+    path_str = path_str.strip()
+    # Remove leading '@' if present
+    if path_str.startswith('@'):
+        path_str = path_str[1:]
+    
+    # Remove quotes
+    path_str = path_str.strip("'\"")
+    # Resolve absolute paths and expand user home (~)
+    return os.path.abspath(os.path.expanduser(path_str))
+
+def parse_multiple_paths(input_str):
+    """Robustly split a string containing one or more paths (quoted or escaped)."""
+    input_str = input_str.strip()
+    if not input_str:
+        return []
+
+    # Some terminals drag-and-drop multiple files like 'path1''path2' without spaces.
+    # We insert spaces between quotes to help shlex split them correctly.
+    input_str = re.sub(r"' *'", "' '", input_str)
+    input_str = re.sub(r'" *"', '" "', input_str)
+    
+    try:
+        paths = shlex.split(input_str)
+    except ValueError:
+        # Fallback to a simpler split if shlex fails (e.g., unclosed quotes)
+        paths = input_str.split(' ')
+        
+    cleaned_paths = [clean_path(p) for p in paths if p.strip()]
+    return cleaned_paths
+
+def get_files_from_path(path, config):
+    """Resolve a single path (file or directory) to a list of media files."""
+    if not os.path.exists(path):
+        return []
+    
+    if os.path.isfile(path):
+        return [path]
+    
+    if os.path.isdir(path):
+        patterns = config["FILE_PATTERN"].split(',')
+        files = []
+        for pattern in patterns:
+            files.extend(glob.glob(os.path.join(path, pattern.strip())))
+        files.sort()
+        return files
+    
+    return []
+
 def show_summary_report(times, file_name, out_dir, prompt_name, provider, whisper_model):
     console.print("\n")
     panel = Panel(f"[bold green]Processing Complete for[/bold green] [cyan]{file_name}[/cyan]", border_style="green")
@@ -436,7 +492,7 @@ def show_summary_report(times, file_name, out_dir, prompt_name, provider, whispe
     console.print(table)
     console.print("\n")
 
-def process_file(file_path, prompt_file, config, do_diarization=True):
+def process_file(file_path, prompt_file, config, do_diarization=True, target_language="auto"):
     """Complete processing pipeline for a single file."""
     base_name = Path(file_path).stem
     out_dir = os.path.join(config["OUTPUT_DIR"], base_name)
@@ -607,7 +663,7 @@ def process_file(file_path, prompt_file, config, do_diarization=True):
         with Status(f"[bold yellow]Applying prompt '{prompt_name}'...", console=console) as status:
             start_time = time.time()
             try:
-                summary = summarize_transcript(full_transcript, prompt_file, config, status=status)
+                summary = summarize_transcript(full_transcript, prompt_file, config, status=status, target_language=target_language)
                 times['post_process'] = time.time() - start_time
                 
                 summary_path = os.path.join(out_dir, f"{prompt_name}.md")
@@ -628,41 +684,130 @@ def process_file(file_path, prompt_file, config, do_diarization=True):
 
 
 def dashboard():
-    console.print(Panel("[bold magenta]Transcripta CLI[/bold magenta]\n[dim]Interactive Local Transcription Engine[/dim]", border_style="magenta"))
+    console.print(Panel("[bold magenta]Transcripta CLI[/bold magenta]\n[dim]Interactive Local Transcription Engine[/dim]\n[dim cyan]by kahmeng kahmeng15.github.io[/dim cyan]", border_style="magenta"))
     config = setup_environment()
     
     while True:
+        # Step 0: Select Mode
+        mode_select = inquirer.prompt([
+            inquirer.List('mode',
+                          message="1. Select Processing Mode",
+                          choices=[
+                              ("Single File (Process one recording)", "single"),
+                              ("Batch Processing (Process multiple files or a folder)", "batch"),
+                              ("Exit", "exit")
+                          ])
+        ])
+        if not mode_select or mode_select['mode'] == 'exit': break
+        global_mode = mode_select['mode']
+        
         files = get_files(config)
         prompts = get_prompts(config)
+        target_files = []
         
-        if not files:
-            console.print(f"[bold yellow]⚠ No media files found in {config['INPUT_DIR']}. Please add files and try again.[/bold yellow]")
-            break
+        if global_mode == "single":
+            file_choices = []
+            if files:
+                file_choices.append(("Latest File", files[0]))
+                if Separator: file_choices.append(Separator())
             
-        file_choices = [
-            ("Transcribe Latest File", files[0]),
-        ]
-        if Separator:
-            file_choices.append(Separator())
-        
-        for f in files:
-            mtime = time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(f)))
-            file_choices.append((f"{Path(f).name} [dim]({mtime})[/dim]", f))
+            file_choices.append(("Manual Path / Drag-and-Drop", "manual"))
+            if files:
+                if Separator: file_choices.append(Separator())
+                for f in files:
+                    mtime = time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(f)))
+                    file_choices.append((f"{Path(f).name} ({mtime})", f))
             
-        file_answers = inquirer.prompt([
-            inquirer.List('target_file',
-                          message="1. Select a file to process",
-                          choices=file_choices,
-            ),
-        ])
-        if not file_answers: break
-        
-        target_file = file_answers['target_file']
+            file_answers = inquirer.prompt([
+                inquirer.List('target_file', message="2. Select a file to process", choices=file_choices)
+            ])
+            if not file_answers: continue
+            
+            if file_answers['target_file'] == "manual":
+                path_answer = inquirer.prompt([inquirer.Text('path', message="Drag and drop file here")])
+                if not path_answer or not path_answer['path']: continue
+                
+                # Single mode: we take the first valid file from whatever they dragged
+                parsed_paths = parse_multiple_paths(path_answer['path'])
+                for p in parsed_paths:
+                    found = get_files_from_path(p, config)
+                    if found:
+                        target_files = [found[0]]
+                        break
+                
+                if not target_files:
+                    console.print("[bold red]Error:[/bold red] No valid media file found in the provided path.")
+                    continue
+            else:
+                target_files = [file_answers['target_file']]
+                
+        elif global_mode == "batch":
+            batch_choices = [
+                ("Drag and Drop Files/Folders (Collection Mode)", "folder_manual")
+            ]
+            if files:
+                if Separator: batch_choices.append(Separator())
+                batch_choices.append(("Select Multiple Files from input_media", "select_files"))
+            
+            batch_answer = inquirer.prompt([
+                inquirer.List('type', message="2. Batch Input Method", choices=batch_choices)
+            ])
+            if not batch_answer: continue
+            
+            if batch_answer['type'] == "folder_manual":
+                console.print("\n[bold cyan]▶ Collection Mode Enabled[/bold cyan]")
+                console.print("[dim]1. Drag and drop one or more files/folders into this terminal and press Enter.[/dim]")
+                console.print("[dim]2. Repeat as many times as you like.[/dim]")
+                console.print("[dim]3. Type [bold yellow]'d'[/bold yellow] and press Enter when you are done collecting files.[/dim]\n")
+                
+                while True:
+                    path_answer = inquirer.prompt([
+                        inquirer.Text('path', message=f"Add to queue ({len(target_files)} files collected, 'd' to finish)")
+                    ])
+                    if not path_answer: break
+                    
+                    val = path_answer['path'].strip()
+                    if val.lower() == 'd':
+                        break
+                    if not val:
+                        continue
+                        
+                    parsed_paths = parse_multiple_paths(val)
+                    new_files_count = 0
+                    for p in parsed_paths:
+                        found = get_files_from_path(p, config)
+                        if found:
+                            target_files.extend(found)
+                            new_files_count += len(found)
+                        else:
+                            console.print(f"[yellow]⚠ No valid files found in: {p}[/yellow]")
+                    
+                    if new_files_count > 0:
+                        console.print(f"[bold green]✓ Added {new_files_count} file(s) to queue.[/bold green]")
+                
+                # Deduplicate while preserving order
+                target_files = list(dict.fromkeys(target_files))
+                
+                if not target_files:
+                    console.print("[bold yellow]Queue is empty. Returning to menu...[/bold yellow]")
+                    continue
+                
+            elif batch_answer['type'] == "select_files":
+                checkbox_choices = []
+                for f in files:
+                    mtime = time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(f)))
+                    checkbox_choices.append((f"{Path(f).name} ({mtime})", f))
+                
+                selected_files = inquirer.prompt([
+                    inquirer.Checkbox('files', message="Select files to process (Space to select, Enter to confirm)", choices=checkbox_choices)
+                ])
+                if not selected_files or not selected_files['files']: continue
+                target_files = selected_files['files']
         
         # New Step: Choose processing mode
         mode_answers = inquirer.prompt([
             inquirer.List('mode',
-                          message="2. Select processing mode",
+                          message=f"3. Select processing mode (for {len(target_files)} file{'s' if len(target_files) > 1 else ''})",
                           choices=[
                               ("Transcribe Only", "transcribe"),
                               ("Transcribe + Identify Speakers", "diarize"),
@@ -670,22 +815,6 @@ def dashboard():
         ])
         if not mode_answers: break
         do_diarization = mode_answers['mode'] == "diarize"
-        
-        # Check for existing transcription
-        base_name = Path(target_file).stem
-        out_dir = os.path.join(config["OUTPUT_DIR"], base_name)
-        transcript_path = os.path.join(out_dir, "transcription.md")
-        
-        if os.path.exists(transcript_path):
-            console.print(f"\n[bold yellow]⚠️  Transcription for '{base_name}' already exists![/bold yellow]")
-            overwrite_answer = inquirer.prompt([
-                inquirer.Confirm('overwrite',
-                                 message="Do you want to overwrite it?",
-                                 default=False)
-            ])
-            if not overwrite_answer or not overwrite_answer['overwrite']:
-                console.print("[dim]Skipping file...[/dim]\n")
-                continue
         
         prompt_choices = [
             ("No Post-processing (Transcribe Only)", None),
@@ -697,7 +826,7 @@ def dashboard():
             
         prompt_answers = inquirer.prompt([
             inquirer.List('target_prompt',
-                          message="3. Select an AI prompt for post-processing",
+                          message="4. Select an AI prompt for post-processing",
                           choices=prompt_choices,
             ),
         ])
@@ -705,10 +834,48 @@ def dashboard():
         
         target_prompt = prompt_answers['target_prompt']
         
-        try:
-            process_file(target_file, target_prompt, config, do_diarization=do_diarization)
-        except Exception as e:
-            console.print(f"[bold red]Critical Error during processing:[/bold red] {e}")
+        # New Step: Select target language for AI output
+        target_language = "auto"
+        if target_prompt:
+            lang_answers = inquirer.prompt([
+                inquirer.List('lang',
+                              message="4. Select target language for AI output",
+                              choices=[
+                                  ("Same as Transcript (Auto)", "auto"),
+                                  ("English", "english"),
+                                  ("Malay (Bahasa Melayu)", "malay"),
+                              ]),
+            ])
+            if not lang_answers: break
+            target_language = lang_answers['lang']
+        
+        # Process the queue
+        for i, file_path in enumerate(target_files):
+            if len(target_files) > 1:
+                console.print(Panel(f"[bold cyan]Queue Progress: {i+1}/{len(target_files)}[/bold cyan]\n[dim]Processing: {Path(file_path).name}[/dim]", border_style="cyan"))
+            
+            # Check for existing transcription (only for individual files in the queue)
+            base_name = Path(file_path).stem
+            out_dir = os.path.join(config["OUTPUT_DIR"], base_name)
+            transcript_path = os.path.join(out_dir, "transcription.md")
+            
+            if os.path.exists(transcript_path) and len(target_files) == 1:
+                console.print(f"\n[bold yellow]⚠️  Transcription for '{base_name}' already exists![/bold yellow]")
+                overwrite_answer = inquirer.prompt([
+                    inquirer.Confirm('overwrite',
+                                     message="Do you want to overwrite it?",
+                                     default=False)
+                ])
+                if not overwrite_answer or not overwrite_answer['overwrite']:
+                    console.print("[dim]Skipping file...[/dim]\n")
+                    continue
+            
+            try:
+                process_file(file_path, target_prompt, config, do_diarization=do_diarization, target_language=target_language)
+            except Exception as e:
+                console.print(f"[bold red]Critical Error during processing '{Path(file_path).name}':[/bold red] {e}")
+            
+        console.print(f"\n[bold green]✓ Successfully processed {len(target_files)} file{'s' if len(target_files) > 1 else ''}![/bold green]")
             
         post_run = inquirer.prompt([
             inquirer.List('action',
