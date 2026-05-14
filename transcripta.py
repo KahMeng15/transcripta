@@ -158,6 +158,34 @@ except (ImportError, Exception) as e:
 
 console = Console()
 
+# Wrap inquirer.prompt to support idle timeout
+original_prompt = inquirer.prompt
+
+def prompt_with_timeout(*args, **kwargs):
+    def timeout_handler(signum, frame):
+        raise TimeoutError("Idle timeout reached.")
+    import signal
+    signal.signal(signal.SIGALRM, timeout_handler)
+    # Get timeout from config, default 300s (5 mins)
+    timeout_str = os.getenv("IDLE_TIMEOUT", "300")
+    try:
+        timeout = int(timeout_str)
+    except ValueError:
+        timeout = 300
+        
+    if timeout > 0:
+        signal.alarm(timeout)
+    try:
+        return original_prompt(*args, **kwargs)
+    except TimeoutError:
+        console.print("\n[bold yellow]Idle timeout reached. Auto-quitting to free up RAM...[/bold yellow]")
+        sys.exit(0)
+    finally:
+        if timeout > 0:
+            signal.alarm(0)
+
+inquirer.prompt = prompt_with_timeout
+
 def check_and_download_models(config):
     """Verify if models exist locally; if not, ask for permission to download."""
     whisper_repo = config["WHISPER_MODEL"]
