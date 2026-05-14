@@ -14,6 +14,7 @@ import warnings
 import atexit
 import shutil
 import shlex
+import traceback
 
 # Suppress excessive warnings from torchcodec and pyannote
 warnings.filterwarnings("ignore", message=".*torchcodec is not installed correctly.*")
@@ -848,6 +849,13 @@ def dashboard():
             ])
             if not lang_answers: break
             target_language = lang_answers['lang']
+            
+        auto_quit_answers = inquirer.prompt([
+            inquirer.Confirm('auto_quit',
+                             message="Auto-quit application when finished? (Recommended to free up RAM)",
+                             default=True)
+        ])
+        auto_quit = auto_quit_answers['auto_quit'] if auto_quit_answers else False
         
         # Process the queue
         for i, file_path in enumerate(target_files):
@@ -873,9 +881,13 @@ def dashboard():
             try:
                 process_file(file_path, target_prompt, config, do_diarization=do_diarization, target_language=target_language)
             except Exception as e:
-                console.print(f"[bold red]Critical Error during processing '{Path(file_path).name}':[/bold red] {e}")
+                console.print(Panel(f"[bold red]Critical Error during processing '{Path(file_path).name}':[/bold red]\n\n{str(e)}\n\n[dim]{traceback.format_exc()}[/dim]", border_style="red"))
             
         console.print(f"\n[bold green]✓ Successfully processed {len(target_files)} file{'s' if len(target_files) > 1 else ''}![/bold green]")
+        
+        if auto_quit:
+            console.print("\n[bold yellow]Auto-quitting to free up RAM...[/bold yellow]")
+            break
             
         post_run = inquirer.prompt([
             inquirer.List('action',

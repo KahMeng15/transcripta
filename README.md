@@ -78,8 +78,9 @@ Transcripta is a powerful, macOS-optimized CLI tool designed for high-fidelity t
 
 ### Quick Start (Single Command)
 You can launch the application instantly using the provided scripts (they auto-activate the environment):
-- **macOS / Linux:** `./run.sh`
-- **Windows:** Double-click `run.bat`
+- **macOS:** Double-click `run_mac.command` in Finder (or run `./run_mac.command` in terminal).
+- **Linux:** `./run_linux.sh`
+- **Windows:** Double-click `run_win.bat`
 
 ### Manual Run
 If you prefer running it manually, you must activate your environment first:
