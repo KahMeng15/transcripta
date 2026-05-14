@@ -24,9 +24,68 @@ Transcripta is a powerful, macOS-optimized CLI tool designed for high-fidelity t
 
 1.  **macOS:** Highly recommended (optimized for Apple Silicon).
 2.  **FFmpeg:** Required for audio extraction.
-    ```bash
-    brew install ffmpeg
-    ```
+
+    - **macOS (Homebrew):**
+        ```bash
+        brew install ffmpeg
+        ```
+
+    - **Windows (winget - recommended):**
+        ```powershell
+        winget install -e --id Gyan.FFmpeg
+        ```
+
+    - **Windows (Chocolatey):**
+        ```powershell
+        choco install ffmpeg
+        ```
+
+    - **Manual (all platforms):**
+        Visit https://ffmpeg.org/download.html and follow the instructions for your OS (for Windows, download a static build such as the Gyan or BtbN builds), then add the `ffmpeg` `bin` folder to your `PATH`.
+
+    ### Windows — First-time setup (recommended for new users)
+
+    If you're new to Windows, follow these quick setup steps to install Git, Python, and useful package managers.
+
+    - **Install Git:**
+        - winget (recommended):
+            ```powershell
+            winget install --id Git.Git -e
+            ```
+        - Chocolatey:
+            ```powershell
+            choco install git
+            ```
+        - Manual: Download from https://git-scm.com/download/win
+
+    - **Install Python 3.9+ (required):**
+        - winget:
+            ```powershell
+            winget install --id Python.Python.3 -e
+            ```
+        - Chocolatey:
+            ```powershell
+            choco install python
+            ```
+        - Manual: https://www.python.org/downloads/windows/
+        - Verify in a new terminal:
+            ```powershell
+            python --version
+            pip --version
+            ```
+        - Create & activate the virtual environment for this project:
+            ```powershell
+            python -m venv .venv
+            .venv\Scripts\activate
+            ```
+
+    - **Package managers:**
+        - `winget` is included on recent Windows 10/11 builds and is recommended for first-time setup. If you prefer Chocolatey, follow https://chocolatey.org/install to install it first.
+
+    - **Add `ffmpeg` to `PATH` (if you installed a manual build):**
+        1. Open **Start → Edit the system environment variables → Environment Variables**.
+        2. Under **System variables** select `Path` → **Edit** → **New**.
+        3. Paste the full path to the `ffmpeg` `bin` folder (e.g., `C:\ffmpeg\bin`) and click **OK**.
 3.  **Python 3.9+:** Ensure you have a modern version of Python installed.
 4.  **Hugging Face Account:** Required to access the diarization models.
     **You MUST visit and accept the terms for ALL three models below:**
