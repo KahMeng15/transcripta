@@ -570,7 +570,10 @@ def process_file(file_path, prompt_file, config, do_diarization=True, target_lan
                 path_or_hf_repo=config["WHISPER_MODEL"], 
                 verbose=True,
                 language=config.get("WHISPER_LANGUAGE"),
-                initial_prompt=config.get("WHISPER_PROMPT")
+                initial_prompt=config.get("WHISPER_PROMPT"),
+                condition_on_previous_text=False,
+                hallucination_silence_threshold=2.0,
+                no_speech_threshold=0.6
             )
         finally:
             sys.stdout = original_stdout
@@ -637,6 +640,13 @@ def process_file(file_path, prompt_file, config, do_diarization=True, target_lan
     
     for segment in whisper_segments:
         start, end, text = segment["start"], segment["end"], segment["text"].strip()
+        if not text:
+            continue
+            
+        words = text.split()
+        if len(words) >= 6 and len(set(w.lower().strip(".,!?:") for w in words)) <= 2:
+            # Skip hallucination loops during silent intervals
+            continue
         
         best_speaker = "Unknown"
         if has_diarization:
