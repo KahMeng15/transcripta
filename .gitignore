@@ -4,3 +4,5 @@ output_files/*
 models/*
 temp/*
 .env
+.env1
+.DS_Store
