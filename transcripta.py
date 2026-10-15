@@ -372,9 +372,14 @@ def extract_audio(input_file, temp_dir):
             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             temp_wav
         ]
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            console.print(f"[dim red]FFmpeg error: {result.stderr.strip().splitlines()[-1] if result.stderr else 'Unknown error'}[/dim red]")
+            if os.path.exists(temp_wav): os.remove(temp_wav)
+            return None
         return temp_wav
     except Exception as e:
+        console.print(f"[dim red]FFmpeg execution failed: {e}[/dim red]")
         if os.path.exists(temp_wav): os.remove(temp_wav)
         return None
 
@@ -534,7 +539,7 @@ def process_file(file_path, prompt_file, config, do_diarization=True, target_lan
         audio_path = extract_audio(file_path, config["TEMP_DIR"])
         if not audio_path:
             console.print("[red]✗ Extraction failed.[/red]")
-            return
+            return False
         status.update("[bold green]✓ Audio ready for transcription.")
         
     console.print("\n[bold cyan]▶ Transcribing audio with MLX-Whisper...[/bold cyan]")
@@ -710,6 +715,7 @@ def process_file(file_path, prompt_file, config, do_diarization=True, target_lan
         os.remove(audio_path)
 
     show_summary_report(times, Path(file_path).name, out_dir, prompt_name, config['SUMMARIZER_PROVIDER'], config["WHISPER_MODEL"])
+    return True
 
 
 def dashboard():
@@ -886,6 +892,8 @@ def dashboard():
         auto_quit = auto_quit_answers['auto_quit'] if auto_quit_answers else False
         
         # Process the queue
+        successful_count = 0
+        failed_count = 0
         for i, file_path in enumerate(target_files):
             if len(target_files) > 1:
                 console.print(Panel(f"[bold cyan]Queue Progress: {i+1}/{len(target_files)}[/bold cyan]\n[dim]Processing: {Path(file_path).name}[/dim]", border_style="cyan"))
@@ -907,11 +915,19 @@ def dashboard():
                     continue
             
             try:
-                process_file(file_path, target_prompt, config, do_diarization=do_diarization, target_language=target_language)
+                success = process_file(file_path, target_prompt, config, do_diarization=do_diarization, target_language=target_language)
+                if success:
+                    successful_count += 1
+                else:
+                    failed_count += 1
             except Exception as e:
+                failed_count += 1
                 console.print(Panel(f"[bold red]Critical Error during processing '{Path(file_path).name}':[/bold red]\n\n{str(e)}\n\n[dim]{traceback.format_exc()}[/dim]", border_style="red"))
             
-        console.print(f"\n[bold green]✓ Successfully processed {len(target_files)} file{'s' if len(target_files) > 1 else ''}![/bold green]")
+        if successful_count > 0:
+            console.print(f"\n[bold green]✓ Successfully processed {successful_count} file{'s' if successful_count > 1 else ''}![/bold green]")
+        if failed_count > 0:
+            console.print(f"\n[bold red]✗ Failed to process {failed_count} file{'s' if failed_count > 1 else ''}.[/bold red]")
         
         if auto_quit:
             console.print("\n[bold yellow]Auto-quitting to free up RAM...[/bold yellow]")

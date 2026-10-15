@@ -8,28 +8,38 @@ echo "========================================"
 echo "    Transcripta - macOS Launcher        "
 echo "========================================"
 
-# Check if python3 is installed
-if ! command -v python3 &> /dev/null; then
+# Find the best Python 3 interpreter (prefer Homebrew if present, otherwise system/conda)
+if [ -x "/opt/homebrew/bin/python3" ]; then
+    SYSTEM_PYTHON="/opt/homebrew/bin/python3"
+elif command -v python3 &> /dev/null; then
+    SYSTEM_PYTHON="$(command -v python3)"
+else
     echo "Python3 could not be found. Please install Python3."
     exit 1
 fi
 
-# Create virtual environment if it doesn't exist
-if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv .venv
+# Create virtual environment if it doesn't exist or is broken
+if [ ! -f ".venv/bin/python" ]; then
+    echo "Creating/repairing virtual environment..."
+    rm -rf .venv
+    "$SYSTEM_PYTHON" -m venv .venv
 fi
 
 # Activate virtual environment
 echo "Activating virtual environment..."
 source .venv/bin/activate
 
-# Install requirements
+# Install requirements using the virtual environment's pip
 echo "Checking/Installing requirements..."
-pip install -r requirements.txt
+"$DIR/.venv/bin/python" -m pip install -r requirements.txt
+if [ $? -ne 0 ]; then
+    echo "[!] Failed to install requirements."
+    exit 1
+fi
 
-# Run the app
+# Run the app directly with the venv python
 echo "Starting Transcripta..."
-python transcripta.py
+"$DIR/.venv/bin/python" transcripta.py
 
 echo "Done."
+
